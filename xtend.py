@@ -65,7 +65,7 @@ class XtendExtractor(object):
     def filter(self, rise_time=True, anomalous_Ls=True, frame_events=True, adj_channels=False, filt_level=2):
         pass
 
-    def pi_channel(self, eV):
+    def eV2pha(self, eV):
         return int(0.1667 * eV)
 
     def extract_spectrum(self, evl=None, spec_file=None, bkg_file=None, src_region=None, bkg_region=None, suffix=None):
@@ -206,7 +206,10 @@ class XtendExtractor(object):
         print(' '.join(args))
 
         proc = subprocess.Popen(['punlearn', 'xaarfgen']).wait()
-        proc = subprocess.Popen(args).wait()
+        # proc = subprocess.Popen(args).wait()
+        # workaround for a bug in xaarfgen command line processing
+        print(' '.join(args))
+        proc = subprocess.Popen(' '.join(args), shell=True).wait()
 
     def get_spectrum(self, src_region=None, bkg_region=None, ra=None, dec=None, suffix=None, extract_spectrum=True, make_rmf=True, make_arf=True, link_resp=True, opt_bin=True):
         for evl in self.evls:
@@ -261,3 +264,77 @@ class XtendExtractor(object):
                 link_spectra(spec_file, bkg=bkg_file, rmf=rmf_file, arf=arf_file)
             if opt_bin:
                 group_spec(grp_file, spec_file, rmffile=rmf_file, grptype='opt')
+
+    def extract_lightcurve(self, evl, lc_file=None, tbin=128.0, exposure=0.0, energy=(300, 12000), bkg_file=None, src_region=None, bkg_region=None, suffix=None):
+        if evl is None:
+            evl = self.evls[0]
+        if lc_file is None:
+            name_arr = ['%sxtd' % self.stem]
+            if len(self.evls) > 1:
+                evl_name = os.basename(evl).split('_')[1]
+                name_arr.append(evl_name)
+            if suffix is not None:
+                name_arr.append(suffix)
+            name_arr.append('tbin%g' % tbin)
+            if energy is not None:
+                name_arr.append('en%g-%g' % energy)
+
+            lc_filename = '_'.join(name_arr) + '_src.lc'
+            lc_file = self.lcdir + '/' + lc_filename
+            bkg_filename = '_'.join(name_arr) + '_bkg.lc'
+            bkg_file = self.lcdir + '/' + bkg_filename
+
+        if os.path.exists(lc_file):
+            os.remove(lc_file)
+
+        with Xselect() as xsl:
+            xsl.read_event(evl)
+            xsl.command('set binsize %g' % tbin)
+            if energy is not None:
+                xsl.command('filter pha_cutoff %d %d' % (self.eV2pha(energy[0]), self.eV2pha(energy[1]) - 1))
+            xsl.command('filter region %s' % src_region)
+            xsl.command('extract curve exposure=%g' % exposure)
+            xsl.command('save curve %s' % lc_file)
+            if bkg_file is not None:
+                xsl.command('clear region')
+                xsl.command('filter region %s' % bkg_region)
+                xsl.command('extract curve exposure=%g' % exposure)
+                xsl.command('save curve %s' % bkg_file)
+
+    def get_lightcurve(self, tbin=128.0, exposure=0.0, energy=(300, 12000), suffix=None, extract_dir=None, src_region=None, bkg_region=None):
+        for evl in self.evls:
+            name_arr = ['%sxtd' % self.stem]
+            if len(self.evls) > 1:
+                evl_name = os.path.basename(evl).split('_')[1]
+                name_arr.append(evl_name)
+            if suffix is not None:
+                name_arr.append(suffix)
+            name_arr.append('tbin%g' % tbin)
+            if energy is not None:
+                name_arr.append('en%g-%g' % energy)
+
+            if src_region is None:
+                if len(self.evls) > 1 and os.path.exists(self.regiondir + '/src_%s.reg' % evl_name):
+                    src_region = self.regiondir + '/src_%s.reg' % evl_name
+                else:
+                    src_region = self.regiondir + '/src.reg'
+            if bkg_region is None:
+                if len(self.evls) > 1 and os.path.exists(self.regiondir + '/bkg_%s.reg' % evl_name):
+                    bkg_region = self.regiondir + '/bkg_%s.reg' % evl_name
+                else:
+                    bkg_region = self.regiondir + '/bkg.reg'
+
+            if extract_dir is None:
+                extract_dir = self.lcdir
+
+            if not os.path.exists(extract_dir):
+                os.mkdir(extract_dir)
+
+            lc_filename = '_'.join(name_arr) + '_src.lc'
+            lc_file = self.lcdir + '/' + lc_filename
+            bkg_filename = '_'.join(name_arr) + '_bkg.lc'
+            bkg_file = self.lcdir + '/' + bkg_filename
+
+            self.extract_lightcurve(evl, lc_file, tbin, exposure, energy, bkg_file, src_region, bkg_region)
+
+    
