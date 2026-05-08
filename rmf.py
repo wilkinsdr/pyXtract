@@ -49,6 +49,58 @@ def pack_rmf(rmf):
     return ngrp, fchan, nchan, matrix
 
 
+def read_sparse_matrix(rmf_file, mat_ext_idx):
+    """Read the sparse matrix columns from one FITS extension of one RMF file."""
+    with fits.open(rmf_file) as f:
+        return {
+            'fchan':  f[mat_ext_idx].data['F_CHAN'].copy(),
+            'nchan':  f[mat_ext_idx].data['N_CHAN'].copy(),
+            'matrix': f[mat_ext_idx].data['MATRIX'].copy(),
+        }
+
+
+def sum_sparse_matrices(sparse_data, weights, n_chan):
+    """
+    Accumulate a weighted sum of sparse RMF matrices row by row.
+
+    sparse_data : list of dicts, each with 'fchan', 'nchan', 'matrix' keys
+                  as returned by read_sparse_matrix
+    weights     : sequence of floats, one per entry in sparse_data
+    n_chan      : number of detector channels (width of the dense working row)
+
+    Returns packed sparse arrays (ngrp, fchan, nchan, matrix) ready to be
+    written as FITS columns.
+    """
+    n_energy = len(sparse_data[0]['fchan'])
+
+    ngrp_out   = np.zeros(n_energy, dtype=np.int16)
+    fchan_out  = np.empty(n_energy, dtype=object)
+    nchan_out  = np.empty(n_energy, dtype=object)
+    matrix_out = np.empty(n_energy, dtype=object)
+    row = np.zeros(n_chan, dtype=np.float64)
+
+    for i in range(n_energy):
+        if i % 5000 == 0:
+            print(f'  Processing row {i}/{n_energy}...')
+        row[:] = 0.0
+        for sd, w in zip(sparse_data, weights):
+            groups = [fc + np.arange(nc) for fc, nc in zip(sd['fchan'][i], sd['nchan'][i])]
+            if groups:
+                row[np.concatenate(groups)] += w * sd['matrix'][i]
+
+        chan_groups = [
+            [j for j, _ in it]
+            for key, it in itertools.groupby(enumerate(row > 0), key=operator.itemgetter(1))
+            if key != 0
+        ]
+        ngrp_out[i]   = len(chan_groups)
+        fchan_out[i]  = np.array([c[0] for c in chan_groups], dtype=np.int32)
+        nchan_out[i]  = np.array([len(c) for c in chan_groups], dtype=np.int32)
+        matrix_out[i] = row[row > 0].astype(np.float32)
+
+    return ngrp_out, fchan_out, nchan_out, matrix_out
+
+
 def add_combined_rmf(rmf_files, weights=None, spec_files=None, outfile='src_comb.rmf', weight_mode='exposure'):
     """
     Add multiple XRISM combined RMF files, each containing multiple MATRIX/EBOUNDS
@@ -89,43 +141,8 @@ def add_combined_rmf(rmf_files, weights=None, spec_files=None, outfile='src_comb
             src_matrix_hdr = f[mat_ext_idx].header.copy()
             ebounds_hdu = f[eb_ext_idx].copy()
 
-        n_energy = len(elow)
-
-        sparse_data = []
-        for rmf_file in rmf_files:
-            print(f'Loading {rmf_file} (MATRIX HDU {mat_ext_idx}, {n_energy} energy rows)...')
-            with fits.open(rmf_file) as f:
-                sparse_data.append({
-                    'fchan':  f[mat_ext_idx].data['F_CHAN'].copy(),
-                    'nchan':  f[mat_ext_idx].data['N_CHAN'].copy(),
-                    'matrix': f[mat_ext_idx].data['MATRIX'].copy(),
-                })
-
-        ngrp_out   = np.zeros(n_energy, dtype=np.int16)
-        fchan_out  = np.empty(n_energy, dtype=object)
-        nchan_out  = np.empty(n_energy, dtype=object)
-        matrix_out = np.empty(n_energy, dtype=object)
-        row = np.zeros(n_chan, dtype=np.float64)
-
-        for i in range(n_energy):
-            if i % 5000 == 0:
-                print(f'  Processing row {i}/{n_energy}...')
-            row[:] = 0.0
-            for sd, w in zip(sparse_data, weights):
-                groups = [fc + np.arange(nc) for fc, nc in zip(sd['fchan'][i], sd['nchan'][i])]
-                if groups:
-                    en_chan = np.concatenate(groups)
-                    row[en_chan] += w * sd['matrix'][i]
-
-            chan_groups = [
-                [j for j, _ in it]
-                for key, it in itertools.groupby(enumerate(row > 0), key=operator.itemgetter(1))
-                if key != 0
-            ]
-            ngrp_out[i]   = len(chan_groups)
-            fchan_out[i]  = np.array([c[0] for c in chan_groups], dtype=np.int32)
-            nchan_out[i]  = np.array([len(c) for c in chan_groups], dtype=np.int32)
-            matrix_out[i] = row[row > 0].astype(np.float32)
+        sparse_data = [read_sparse_matrix(rmf_file, mat_ext_idx) for rmf_file in rmf_files]
+        ngrp_out, fchan_out, nchan_out, matrix_out = sum_sparse_matrices(sparse_data, weights, n_chan)
 
         elow_col   = fits.Column(name='ENERG_LO', format='E', array=elow)
         ehigh_col  = fits.Column(name='ENERG_HI', format='E', array=ehigh)
@@ -190,14 +207,8 @@ def add_rmf(rmf_files, weights=None, spec_files=None, outfile='src_comb.rmf', we
         ebounds_hdr = f['EBOUNDS'].header
         matrix_hdr = f['MATRIX'].header
 
-    rmf_matrix = np.zeros((len(elow), len(chan)))
-
-    for rmf_file, weight in zip(rmf_files, weights):
-        print('Unpacking ' + rmf_file)
-        r, _, _ = unpack_rmf(rmf_file)
-        rmf_matrix += weight * r
-
-    ngrp, fchan, nchan, matrix = pack_rmf(rmf_matrix)
+    sparse_data = [read_sparse_matrix(rmf_file, 'MATRIX') for rmf_file in rmf_files]
+    ngrp, fchan, nchan, matrix = sum_sparse_matrices(sparse_data, weights, len(chan))
 
     chan_col = fits.Column(name='CHANNEL', format='J', array=chan)
     emin_col = fits.Column(name='E_MIN', format='E', array=emin)

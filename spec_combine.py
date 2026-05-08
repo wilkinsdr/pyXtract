@@ -153,4 +153,5 @@ def combine_arf(arf_list, weights, comb_arf):
             'weights='+weightlist,
             'out_ARF=!'+comb_arf,
             'clobber=yes']
+    print(' '.join(args))
     subprocess.Popen(args).wait()
