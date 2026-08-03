@@ -124,7 +124,7 @@ class ResolveExtractor(object):
 
         self.evls = self.find_evls(filt_level=filt_level)
 
-    def extract_spectrum(self, evl=None, spec_file=None, grade=['Hp'], pixels='0:11,13:26,28:35', time=None, extract_evl=False, suffix=None):
+    def extract_spectrum(self, evl=None, spec_file=None, grade=['Hp'], pixels='0:11,13:26,28:35', time=None, gti=None, extract_evl=False, suffix=None):
         if isinstance(grade, str):
             grade = [grade]
         grade_sel = [rsl_grade_def[g] for g in grade]
@@ -142,6 +142,8 @@ class ResolveExtractor(object):
                 name_arr.append(suffix)
             elif time is not None:
                 name_arr.append('time%g-%g' % time)
+            elif gti is not None:
+                name_arr.append('gti%s' % os.path.basename(gti).split('.')[0])
 
             spec_filename = '_'.join(name_arr) + '.pha'
             spec_file = self.specdir + '/' + spec_filename
@@ -152,10 +154,12 @@ class ResolveExtractor(object):
         if extract_evl and os.path.exists(extract_evl):
             os.remove(extract_evl)
 
-        with Xselect() as xsl:
+        with Xselect(mission='XRISM') as xsl:
             xsl.read_event(evl)
             if time is not None:
                 xsl.filter_time_scc(time[0], time[1])
+            if gti is not None:
+                xsl.filter_gti(gti)
             if extract_evl:
                 # if we're filtering events by time, we need to extract an event list with the time filter applied
                 # for rslmkrmf
@@ -373,6 +377,51 @@ class ResolveExtractor(object):
             if opt_bin:
                 group_spec(grp_file, spec_file, rmffile=rmf_file, grptype='opt')
 
+    def get_gti_spectrum(self, gti, grade=['Hp'], pixels='0:11,13:26,28:35', whichrmf='X', split_rmf=True,
+                     ra=None, dec=None, suffix=None, extract_spectrum=True, make_rmf=True, make_arf=True,
+                     link_resp=True, opt_bin=True):
+        for evl in self.evls:
+            name_arr = ['%srsl' % self.stem]
+            if len(self.evls) > 1:
+                evl_name = os.path.basename(evl).split('_')[1]
+                name_arr.append(evl_name)
+            if suffix is not None:
+                name_arr.append(suffix)
+            else:
+                name_arr.append('gti%s' % os.path.basename(gti).split('.')[0])
+
+            if not os.path.exists(self.specdir):
+                os.mkdir(self.specdir)
+
+            spec_filename = '_'.join(name_arr) + '_%s' % ''.join(grade) + '.pha'
+            spec_file = self.specdir + '/' + spec_filename
+
+            time_evl = self.scratchdir + '/' + '_'.join(name_arr) + '.evl'
+
+            rmf_root = self.specdir + '/' + '_'.join(name_arr) + '_%s' % ''.join(grade) + '_%s' % whichrmf
+            rmf_file = rmf_root + '_comb.rmf' if split_rmf else rmf_root + '.rmf'
+
+            expomap_file = self.scratchdir + '/' + '_'.join(name_arr) + '.expo'
+            region_file = self.scratchdir + '/' + self.stem + '_DET.reg'
+            arf_file = self.specdir + '/' + '_'.join(name_arr) + '_src.arf'
+
+            grp_file = spec_file.replace('.pha', '_opt.grp')
+
+            if extract_spectrum:
+                self.extract_spectrum(evl, spec_file, grade, pixels, gti=gti, extract_evl=time_evl, suffix=suffix)
+            if make_rmf:
+                self.make_rmf(rmf_root, evl=time_evl, whichrmf=whichrmf, grade=grade, pixels=pixels.replace(':', '-'),
+                              split=split_rmf)
+            if make_arf:
+                self.exposure_map(expomap_file, evl)
+                self.make_region_file(region_file, pixels)
+                self.make_arf_pointsource(arf_file, ra=ra, dec=dec, expomap=expomap_file, regionfile=region_file,
+                                          rmffile=rmf_file)
+            if link_resp:
+                link_spectra(spec_file, rmf=rmf_file, arf=arf_file)
+            if opt_bin:
+                group_spec(grp_file, spec_file, rmffile=rmf_file, grptype='opt')
+
     def extract_lightcurve(self, evl, lc_file=None, tbin=128.0, exposure=0.0, energy=(2000, 10000), grade=None, pixels='0:11,13:26,28:35', suffix=None):
         if grade is not None:
             if isinstance(grade, str):
@@ -401,7 +450,7 @@ class ResolveExtractor(object):
         if os.path.exists(lc_file):
             os.remove(lc_file)
 
-        with Xselect() as xsl:
+        with Xselect(mission='XRISM') as xsl:
             xsl.read_event(evl)
             if pixels is not None:
                 xsl.command('filter column "PIXEL=%s"' % pixels)

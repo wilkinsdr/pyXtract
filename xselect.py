@@ -6,8 +6,9 @@ import time
 import os
 
 class Xselect(object):
-    def __init__(self, session_name=None):
+    def __init__(self, session_name=None, mission=None):
         self.session_name = 'xsel%d' % int(time.time() % 604800) if session_name is None else session_name
+        self.mission = mission
         self.xsel = None
 
     def start(self):
@@ -19,6 +20,8 @@ class Xselect(object):
 
     def __enter__(self):
         self.start()
+        if self.mission is not None:
+            self.command('set mission %s' % self.mission)
         return self
 
     def command(self, cmd):
@@ -45,3 +48,6 @@ class Xselect(object):
         self.command('filter time scc')
         self.command('%g, %g' % (tstart, tend))
         self.command('x')
+
+    def filter_gti(self, gti_file):
+        self.command('filter time file %s' % gti_file)

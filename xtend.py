@@ -88,7 +88,7 @@ class XtendExtractor(object):
         if os.path.exists(spec_file):
             os.remove(spec_file)
 
-        with Xselect() as xsl:
+        with Xselect(mission='XRISM') as xsl:
             xsl.read_event(evl)
             xsl.command('filter region %s' % src_region)
             xsl.command('extract spectrum')
@@ -287,7 +287,7 @@ class XtendExtractor(object):
         if os.path.exists(lc_file):
             os.remove(lc_file)
 
-        with Xselect() as xsl:
+        with Xselect(mission='XRISM') as xsl:
             xsl.read_event(evl)
             xsl.command('set binsize %g' % tbin)
             if energy is not None:
