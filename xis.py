@@ -8,6 +8,7 @@ from .spec_util import *
 import os
 import re
 from astropy.io import fits
+from datetime import datetime
 
 xis_names = {'xi0': 'XIS0', 'xi1': 'XIS1', 'xi2': 'XIS2', 'xi3': 'XIS3'}
 
@@ -16,7 +17,7 @@ class XisExtractor(object):
     # class to extract data products from Suzaku XIS observations
     #
 
-    def __init__(self, obsdir, filt_level=1, ccd=None, mode=None, evl_dir='reproc', run_reduction=False, suffix=None):
+    def __init__(self, obsdir, evl_dir='reproc', run_reduction=False, suffix=None):
         self.obsdir = obsdir
         self.xisdir = obsdir + '/xis'
 
@@ -33,21 +34,26 @@ class XisExtractor(object):
         self.auxdir = self.obsdir + '/auxil'
 
         self.evls = self.find_evls()
-        # if len(self.evls) == 0:
-        #     print('Filter level %d event list not available, falling back to level 1' % filt_level)
-        #     self.evls = self.find_evls(filt_level='', ccd=ccd, mode=mode)
-        #     self.filt_level = 1
+        if len(self.evls['xi0']) == 0 and len(self.evls['xi1']) == 0 and len(self.evls['xi2']) == 0 and len(self.evls['xi3']) == 0:
+             if run_reduction:
+                self.reprocess()
+                self.evls = self.find_evls()
+             else:
+                raise ValueError('Processed event lists not found in selected directory. Do you need to run aepipline?')
 
         if not os.path.exists(self.regiondir):
             os.mkdir(self.regiondir)
 
         self.regions = self.populate_regions()
 
-        with fits.open(self.evls['xi0'][0]) as f:
-            self.ra_nom = f[0].header['RA_NOM']
-            self.dec_nom = f[0].header['DEC_NOM']
+        try:
+            with fits.open(self.evls['xi0'][0]) as f:
+                self.ra_nom = f[0].header['RA_NOM']
+                self.dec_nom = f[0].header['DEC_NOM']
+        except:
+            print("Warning: Could not read RA_NOM and DEC_NOM from event list header. Ensure that event lists have been properly processed.")
 
-    def reprocess(self, filt_level=2, ccd=None, mode=None):
+    def reprocess(self):
         tmp_reproc_dir = 'tmp_reproc_%s' % self.obsdir
         if not os.path.exists(tmp_reproc_dir):
             os.mkdir(tmp_reproc_dir)
@@ -85,6 +91,11 @@ class XisExtractor(object):
 
             regions[inst]['src'] = regions[inst]['src'][0] if len(regions[inst]['src']) > 0 else None
             regions[inst]['bkg'] = regions[inst]['bkg'][0] if len(regions[inst]['bkg']) > 0 else None
+
+            if regions[inst]['src'] is None:
+                print('Warning: Source region file for %s not found.' % (inst))
+            if regions[inst]['bkg'] is None:
+                print('Warning: Background region file for %s not found.' % (inst))
         return regions
 
     def eV2pha(self, eV):
@@ -93,6 +104,9 @@ class XisExtractor(object):
     def extract_spectrum(self, evl, spec_file=None, src_region=None, bkg_file=None, bkg_region=None):
         if os.path.exists(spec_file):
             os.remove(spec_file)
+
+        if bkg_file is not None and os.path.exists(bkg_file):
+            os.remove(bkg_file)
 
         with Xselect(mission='SUZAKU') as xsl:
             if isinstance(evl, list):
@@ -106,7 +120,7 @@ class XisExtractor(object):
             xsl.command('save spectrum %s resp=no group=no' % spec_file)
             if bkg_file is not None:
                 xsl.command('clear region')
-                xsl.command('filter region %s resp=no group=no' % bkg_region)
+                xsl.command('filter region %s' % bkg_region)
                 xsl.command('extract spectrum')
                 xsl.command('save spectrum %s resp=no group=no' % bkg_file)
 
@@ -157,7 +171,7 @@ class XisExtractor(object):
         #print(' '.join(args))
         #proc = subprocess.Popen(' '.join(args), shell=True).wait()
 
-    def get_spectrum(self, instruments=['xi0', 'xi1', 'xi2', 'xi3'], src_region=None, bkg_region=None, ra=None, dec=None, suffix=None, extract_spectrum=True, make_rmf=True, make_arf=True, link_resp=True, opt_bin=True):
+    def get_spectrum(self, instruments=['xi0', 'xi1', 'xi2', 'xi3'], src_region=None, bkg_region=None, ra=None, dec=None, suffix=None, extract_spectrum=True, make_rmf=True, make_arf=True, link_resp=True, opt_bin=True, sum_fi=True):
         if not os.path.exists(self.specdir):
             os.mkdir(self.specdir)
 
@@ -202,76 +216,90 @@ class XisExtractor(object):
             if opt_bin:
                 group_spec(grp_file, spec_file, rmffile=rmf_file, grptype='opt')
 
-    def extract_lightcurve(self, evl, lc_file=None, tbin=128.0, exposure=0.0, energy=(300, 12000), bkg_file=None, src_region=None, bkg_region=None, suffix=None):
-        if evl is None:
-            evl = self.evls[0]
-        if lc_file is None:
-            name_arr = ['%sxtd' % self.stem]
-            if len(self.evls) > 1:
-                evl_name = os.basename(evl).split('_')[1]
-                name_arr.append(evl_name)
-            if suffix is not None:
-                name_arr.append(suffix)
-            name_arr.append('tbin%g' % tbin)
-            if energy is not None:
-                name_arr.append('en%g-%g' % energy)
+        if sum_fi:
+            self.sum_fi_spectra(suffix=suffix, opt_bin=opt_bin)
 
-            lc_filename = '_'.join(name_arr) + '_src.lc'
-            lc_file = self.lcdir + '/' + lc_filename
-            bkg_filename = '_'.join(name_arr) + '_bkg.lc'
-            bkg_file = self.lcdir + '/' + bkg_filename
+    def sum_fi_spectra(self, suffix=None, opt_bin=True):
+        xi2_exists = (len(glob.glob(self.specdir + '/*_xi2_*')) > 0)
+        xi_list = ['xi0', 'xi2', 'xi3'] if xi2_exists else ['xi0', 'xi3']
+        spec_files = ['_'.join([self.stem, inst] + ([suffix] if suffix is not None else []) + ['src.pha']) for inst in xi_list]
+        bkg_files = ['_'.join([self.stem, inst] + ([suffix] if suffix is not None else []) + ['bkg.pha']) for inst in xi_list]
+        rmf_files = ['_'.join([self.stem, inst] + ([suffix] if suffix is not None else []) + ['src.rmf']) for inst in xi_list]
+        arf_files = ['_'.join([self.stem, inst] + ([suffix] if suffix is not None else []) + ['src.arf']) for inst in xi_list]
 
-        if os.path.exists(lc_file):
-            os.remove(lc_file)
+        outfile = self.specdir + '/' + '_'.join([self.stem] + ([suffix] if suffix is not None else []) + ['fi.pha'])
 
-        with Xselect(mission='SUZAKU') as xsl:
-            xsl.read_event(evl)
-            xsl.command('set binsize %g' % tbin)
-            if energy is not None:
-                xsl.command('filter pha_cutoff %d %d' % (self.eV2pha(energy[0]), self.eV2pha(energy[1]) - 1))
-            xsl.command('filter region %s' % src_region)
-            xsl.command('extract curve exposure=%g' % exposure)
-            xsl.command('save curve %s' % lc_file)
-            if bkg_file is not None:
-                xsl.command('clear region')
-                xsl.command('filter region %s' % bkg_region)
+        args = ['ftaddspec',
+                'infiles=' + ' '.join(spec_files),
+                'sumtype=area',
+                'outfile=' + os.path.basename(outfile),
+                'backfiles=' + ' '.join(bkg_files),
+                'arffiles=' + ' '.join(arf_files),
+                'rmffiles=' + ' '.join(rmf_files),
+                'clobber=yes'
+        ]
+
+        print(' '.join(args))
+
+        proc = subprocess.Popen(['punlearn', 'ftaddspec']).wait()
+        proc = subprocess.Popen(args, cwd=self.specdir).wait()
+
+        if opt_bin:
+            grp_file = self.specdir + '/' + '_'.join([self.stem] + ([suffix] if suffix is not None else []) + ['fi_opt.grp'])
+            rmf_file = self.specdir + '/' + '_'.join([self.stem] + ([suffix] if suffix is not None else []) + ['fi.rmf'])
+            group_spec(grp_file, outfile, rmffile=rmf_file, grptype='opt')
+
+    def extract_lightcurve(self, evl, lc_file=None, tbin=128.0, exposure=0.0, energy=(300, 12000), bkg_file=None, src_region=None, bkg_region=None):
+            if os.path.exists(lc_file):
+                os.remove(lc_file)
+    
+            if bkg_file is not None and os.path.exists(bkg_file):
+                os.remove(bkg_file)
+    
+            with Xselect(mission='SUZAKU') as xsl:
+                if isinstance(evl, list):
+                    xsl.command('read event')
+                    xsl.command(os.path.dirname(evl[0]))
+                    xsl.command(','.join([os.path.basename(e) for e in evl]))
+                else:
+                    xsl.read_event(evl)
+                xsl.command('set binsize %g' % tbin)
+                if energy is not None:
+                    xsl.command('filter pha_cutoff %d %d' % (self.eV2pha(energy[0]), self.eV2pha(energy[1]) - 1))
+                xsl.command('filter region %s' % src_region)
                 xsl.command('extract curve exposure=%g' % exposure)
-                xsl.command('save curve %s' % bkg_file)
+                xsl.command('save curve %s' % lc_file)
+                if bkg_file is not None:
+                    xsl.command('clear region')
+                    xsl.command('filter region %s' % bkg_region)
+                    xsl.command('extract curve exposure=%g' % exposure)
+                    xsl.command('save curve %s' % bkg_file)
 
-    def get_lightcurve(self, tbin=128.0, exposure=0.0, energy=(300, 12000), suffix=None, extract_dir=None, src_region=None, bkg_region=None):
-        for evl in self.evls:
-            name_arr = ['%sxtd' % self.stem]
-            if len(self.evls) > 1:
-                evl_name = os.path.basename(evl).split('_')[1]
-                name_arr.append(evl_name)
-            if suffix is not None:
-                name_arr.append(suffix)
-            name_arr.append('tbin%g' % tbin)
-            if energy is not None:
-                name_arr.append('en%g-%g' % energy)
+    def get_lightcurve(self, tbin=128.0, exposure=0.0, energy=(300, 12000), instruments=['xi0', 'xi1', 'xi2', 'xi3'], src_region=None, bkg_region=None, suffix=None):
+            if not os.path.exists(self.lcdir):
+                os.mkdir(self.lcdir)
+    
+            for inst in instruments:
+                name_arr = [self.stem, inst]
+                if suffix is not None:
+                    name_arr.append(suffix)
+                
+                lc_filename = '_'.join(name_arr) + '_src.lc'
+                lc_file = self.lcdir + '/' + lc_filename
+    
+                bkg_filename = '_'.join(name_arr) + '_bkg.lc'
+                bkg_file = self.lcdir + '/' + bkg_filename
+    
+                if len(self.evls[inst]) == 0:
+                    print('No event list found for %s, skipping' % inst)
+                    continue
+    
+                if src_region is None:
+                    src_region = self.regions[inst]['src']
+                    print('Using default source region for %s: %s' % (inst, src_region))
+                if bkg_region is None:
+                    bkg_region = self.regions[inst]['bkg']
+                    print('Using default background region for %s: %s' % (inst, bkg_region))
 
-            if src_region is None:
-                if len(self.evls) > 1 and os.path.exists(self.regiondir + '/src_%s.reg' % evl_name):
-                    src_region = self.regiondir + '/src_%s.reg' % evl_name
-                else:
-                    src_region = self.regiondir + '/src.reg'
-            if bkg_region is None:
-                if len(self.evls) > 1 and os.path.exists(self.regiondir + '/bkg_%s.reg' % evl_name):
-                    bkg_region = self.regiondir + '/bkg_%s.reg' % evl_name
-                else:
-                    bkg_region = self.regiondir + '/bkg.reg'
-
-            if extract_dir is None:
-                extract_dir = self.lcdir
-
-            if not os.path.exists(extract_dir):
-                os.mkdir(extract_dir)
-
-            lc_filename = '_'.join(name_arr) + '_src.lc'
-            lc_file = self.lcdir + '/' + lc_filename
-            bkg_filename = '_'.join(name_arr) + '_bkg.lc'
-            bkg_file = self.lcdir + '/' + bkg_filename
-
-            self.extract_lightcurve(evl, lc_file, tbin, exposure, energy, bkg_file, src_region, bkg_region)
-
+                self.extract_lightcurve(self.evls[inst], lc_file=lc_file, tbin=tbin, exposure=exposure, energy=energy, bkg_file=bkg_file, src_region=src_region, bkg_region=bkg_region)
     
