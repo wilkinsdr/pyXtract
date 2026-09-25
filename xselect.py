@@ -12,14 +12,16 @@ class Xselect(object):
         self.xsel = None
 
     def start(self):
-        args = ['xselect',
-                'prefix=%s' % self.session_name]
+        # args = ['xselect',
+        #         'prefix=%s' % self.session_name]     # prefix seems to be broken in Xselect 3.0
+        args = ['xselect']
 
         self.xsel = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=None, universal_newlines=True,
                                      text=True, bufsize=1)
 
     def __enter__(self):
         self.start()
+        self.command(self.session_name)
         if self.mission is not None:
             self.command('set mission %s' % self.mission)
         return self
